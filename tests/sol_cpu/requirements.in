@@ -1,0 +1,32 @@
+# Minimal import/runtime dependency set for the SOL CPU integration tests.
+# Versions follow the repository's current uv.lock. Run uv pip commands from this
+# directory so uv.toml routes PyTorch packages to the official CPU index.
+accelerate==1.12.0
+ai2-olmo-core @ git+https://github.com/allenai/OLMo-core.git@6ac500d8d5653400e5dd7e83ebe877109ae072b2
+antlr4-python3-runtime==4.11.0
+backoff==2.2.1
+beaker-py==2.6.0
+datasets==4.8.5
+deepspeed==0.18.4
+docker==7.1.0
+immutabledict==1.2.0
+langdetect==1.0.9
+nltk==3.9.2
+numpy==2.2.6
+openenv-core==0.2.1
+pandas==2.3.3
+pyarrow==23.0.0
+pydantic==2.12.5
+pytest==9.0.2
+python-dateutil==2.9.0.post0
+ray==2.53.0
+requests==2.32.5
+rich==13.9.4
+sympy==1.14.0
+tiktoken==0.12.0
+tokenizers==0.22.2
+torch==2.10.0
+transformers==5.4.0
+tqdm==4.67.1
+wandb==0.23.1
+absl-py==2.3.1

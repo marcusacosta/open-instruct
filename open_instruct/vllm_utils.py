@@ -65,7 +65,7 @@ from open_instruct.data_types import (
 from open_instruct.dataset_transformation import GROUND_TRUTHS_KEY, RAW_PROMPT_KEY, VERIFIER_SOURCE_KEY
 from open_instruct.environments.base import EnvCall, RolloutState, StepResult
 from open_instruct.environments.tools.parsers import ToolParser, create_tool_parser
-from open_instruct.ground_truth_utils import RewardConfig
+from open_instruct.ground_truth_utils import SOL_VERIFIER_CORRECTNESS_KEY, RewardConfig
 
 logger = logger_utils.setup_logger(__name__)
 
@@ -526,6 +526,8 @@ async def finalize_completed_request(actor: "LLMRayActor", base_request_id: str)
     actor.request_metadata.pop(base_request_id, None)
 
     result.reward_scores, result.reward_metrics = await compute_rewards(actor, result, example)
+    if result.reward_metrics and SOL_VERIFIER_CORRECTNESS_KEY in result.reward_metrics:
+        result.verifier_correctness = result.reward_metrics.pop(SOL_VERIFIER_CORRECTNESS_KEY)
     results_queue = actor.eval_results_queue if is_eval else actor.results_queue
     results_queue.put(result)
 

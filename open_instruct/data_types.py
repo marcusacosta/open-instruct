@@ -58,6 +58,8 @@ class GenerationResult:
     logprobs: list[list[float]] = field(default_factory=list)
     reward_scores: list[float] | None = None
     reward_metrics: dict[str, Any] | None = None
+    verifier_correctness: list[bool] | None = None
+    """Unweighted binary verifier results, populated only when the SOL reward is enabled."""
     model_step: int = 0
 
 

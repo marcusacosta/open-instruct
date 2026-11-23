@@ -129,6 +129,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
+/tests/sol_cpu/.venv-sol-cpu/
 env/
 venv/
 ENV/

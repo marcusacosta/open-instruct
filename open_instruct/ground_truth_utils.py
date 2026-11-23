@@ -39,8 +39,10 @@ from open_instruct.math_utils import (
 )
 from open_instruct.rubrics.prompts import RUBRIC_SCORING_PROMPT
 from open_instruct.rubrics.run_utils import extract_json_from_response, run_litellm_async, run_litellm_async_raw
+from open_instruct.sol_utils import _validate_sol_coefficients, compute_sol_rewards
 
 logger = logger_utils.setup_logger(__name__)
+SOL_VERIFIER_CORRECTNESS_KEY = "_sol_verifier_correctness"
 
 # remove excessive logging from liteLLM
 logging.getLogger("LiteLLM").setLevel(logging.WARNING)
@@ -1304,6 +1306,7 @@ async def apply_verifiable_reward(
     reward_mult: float = 1.0,
     queries: list[str] | None = None,
     rollout_states: list[dict | None] | None = None,
+    return_correctness: bool = False,
 ):
     if queries is None:
         queries = [None] * len(responses)
@@ -1344,6 +1347,8 @@ async def apply_verifiable_reward(
 
     response_rewards = [0] * len(responses)
     response_per_func_rewards = [{} for _ in range(len(responses))]
+    response_correctness = [None] * len(responses)
+    response_verifier_counts = [0] * len(responses)
 
     for result, metadata in zip(reward_results, task_metadata):
         response_idx = metadata["response_idx"]
@@ -1351,6 +1356,11 @@ async def apply_verifiable_reward(
         reward_weight = metadata["reward_weight"]
 
         score = result.score if hasattr(result, "score") else result
+        response_verifier_counts[response_idx] += 1
+        if return_correctness:
+            if score not in (0, 1, 0.0, 1.0):
+                raise ValueError("SOL requires a binary verifier score (0 or 1) for every response")
+            response_correctness[response_idx] = bool(score)
         weighted_reward = reward_mult * score * reward_weight
 
         response_rewards[response_idx] += weighted_reward
@@ -1358,6 +1368,10 @@ async def apply_verifiable_reward(
             response_per_func_rewards[response_idx].get(dataset, 0) + weighted_reward
         )
 
+    if return_correctness:
+        if any(count != 1 for count in response_verifier_counts):
+            raise ValueError("SOL requires exactly one verifier result for every response")
+        return response_rewards, response_per_func_rewards, response_correctness
     return response_rewards, response_per_func_rewards
 
 
@@ -1376,9 +1390,27 @@ class RewardConfig:
     verifier_functions: dict[str, VerifierFunction] = dataclasses.field(default_factory=dict)
     reward_aggregator: Literal["last", "sum"] = "last"
     """How to combine per-turn rewards: 'last' (use last turn reward) or 'sum' (sum all rewards across turns)."""
+    use_sol_reward: bool = False
+    sol_alpha: float = 2.0
+    sol_beta: float = 0.001
+
+    def __post_init__(self) -> None:
+        if self.use_sol_reward:
+            _validate_sol_coefficients(self.sol_alpha, self.sol_beta)
 
     def build(self) -> Callable:
         """Build and return the reward function."""
+        if self.use_sol_reward and (
+            not self.apply_verifiable_reward
+            or self.apply_r1_style_format_reward
+            or self.non_stop_penalty
+            or self.only_reward_good_outputs
+            or self.additive_format_reward
+            or self.reward_aggregator != "last"
+        ):
+            raise ValueError(
+                "SOL requires verifier-only rewards, reward_aggregator='last', and no format, non-stop, or tool gating rewards"
+            )
         aggregator: RewardAggregator = {"last": LastRewardAggregator(), "sum": SumRewardAggregator()}[
             self.reward_aggregator
         ]
@@ -1418,7 +1450,7 @@ class RewardConfig:
                 metrics["val/format_scores"] = np.array(format_scores).mean()
 
             if self.apply_verifiable_reward:
-                verifiable_rewards, per_func_rewards = await apply_verifiable_reward(
+                verifier_results = await apply_verifiable_reward(
                     self.verifier_functions,
                     responses,
                     decoded_responses,
@@ -1427,11 +1459,18 @@ class RewardConfig:
                     reward_mult=self.verification_reward,
                     queries=queries,
                     rollout_states=rollout_states,
+                    return_correctness=self.use_sol_reward,
                 )
+                if self.use_sol_reward:
+                    verifiable_rewards, per_func_rewards, verifier_correctness = verifier_results
+                else:
+                    verifiable_rewards, per_func_rewards = verifier_results
                 if len(verifiable_rewards) != len(scores):
                     raise ValueError(f"{len(verifiable_rewards)=} != {len(scores)=}")
 
                 for i in range(len(verifiable_rewards)):
+                    if self.use_sol_reward and rollout_states[i].get("rewards"):
+                        raise ValueError("SOL does not support per-turn/tool rewards")
                     if not self.only_reward_good_outputs or (good_outputs[i] and self.only_reward_good_outputs):
                         turn_rewards = list(rollout_states[i].get("rewards", []))
                         verifier_score = verifiable_rewards[i]
@@ -1461,6 +1500,15 @@ class RewardConfig:
                     np_value = np.array(value)
                     metrics[f"objective/{key}_reward"] = np_value.mean()
                     metrics[f"objective/{key}_correct_rate"] = (np_value > 0.0).mean()
+
+                if self.use_sol_reward:
+                    scores = compute_sol_rewards(
+                        verifier_correctness,
+                        [len(response) for response in responses],
+                        self.sol_alpha,
+                        self.sol_beta,
+                    )
+                    metrics[SOL_VERIFIER_CORRECTNESS_KEY] = verifier_correctness
 
             if self.non_stop_penalty:
                 assert len(finish_reasons) == len(scores)

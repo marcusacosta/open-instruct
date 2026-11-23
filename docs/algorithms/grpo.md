@@ -13,6 +13,20 @@ dense-model training, existing workflows and historical reproduction.
 - `grpo.py` is the recommended implementation for supported dense models, built on OLMo-core's native training infrastructure (FSDP). It uses Ray for distributed training with vLLM inference.
 - `grpo_fast.py` is a faster variant using [packing techniques](https://huggingface.co/blog/sirluk/llm-sequence-packing) with DeepSpeed.
 
+### Sample Optimal Length reward
+
+The dense GRPO entry points (`grpo.py` and `grpo_fast.py`) support an opt-in
+ShorterBetter Sample Optimal Length reward via `--use_sol_reward`, with
+`--sol_alpha` (default `2.0`) and `--sol_beta` (default `0.001`). For each
+prompt group, the reward is `alpha * correctness - beta * abs(response_length -
+target_length)`, where the target is the shortest correct response length, or
+the mean response length when every response is incorrect. Correctness comes
+from the binary verifier result. SOL requires exactly one binary verifier per
+response and rejects format, tool/process, rubric, non-stop, and summed-turn
+reward combinations. Response length counts generated tokens, including
+truncated responses. With SOL disabled, existing reward and advantage behavior
+is unchanged.
+
 
 ## `grpo.py` (OLMo-core)
 

@@ -48,6 +48,7 @@ from open_instruct.dataset_transformation import (
 from open_instruct.environments.tools.utils import EnvStatistics
 from open_instruct.model_utils import Batch
 from open_instruct.rl_utils import PackedSequences, pack_sequences, save_rollout_metadata, save_rollouts_to_disk
+from open_instruct.sol_utils import _validate_sol_coefficients
 from open_instruct.rubrics import RubricManager
 from open_instruct.utils import combine_reward_metrics
 
@@ -452,6 +453,9 @@ class StreamingDataLoaderConfig:
     # Reward - Verifiable reward
     apply_verifiable_reward: bool = True
     verification_reward: float = 10.0
+    use_sol_reward: bool = False
+    sol_alpha: float = 2.0
+    sol_beta: float = 0.001
     remap_verifier: str | None = None
 
     # Reward aggregation
@@ -497,6 +501,9 @@ class StreamingDataLoaderConfig:
     max_possible_score: float = 1.0
 
     def __post_init__(self):
+        if self.use_sol_reward:
+            _validate_sol_coefficients(self.sol_alpha, self.sol_beta)
+
         if self.eval_response_length is None:
             self.eval_response_length = self.response_length
 
@@ -531,6 +538,18 @@ class StreamingDataLoaderConfig:
             or self.non_stop_penalty
             or self.apply_evolving_rubric_reward
         ), "At least one reward must be applied!"
+
+        if self.use_sol_reward and (
+            not self.apply_verifiable_reward
+            or self.apply_r1_style_format_reward
+            or self.non_stop_penalty
+            or self.additive_format_reward
+            or self.reward_aggregator != "last"
+            or self.apply_evolving_rubric_reward
+        ):
+            raise ValueError(
+                "SOL requires verifier-only rewards, reward_aggregator='last', and no format, non-stop, or rubric rewards"
+            )
 
         if self.stop_strings is None:
             self.stop_strings = []
@@ -780,6 +799,8 @@ def process_group(
         f"but expected {generation_config.n} samples per prompt. "
         f"Index: {result.index}, Prompt ID: {result.prompt_id}"
     )
+    if result.verifier_correctness is not None and len(result.verifier_correctness) != len(result.responses):
+        raise ValueError("SOL verifier correctness must align one-to-one with responses")
 
     example = dataset[result.index]
     query = example[INPUT_IDS_PROMPT_KEY]
@@ -809,7 +830,11 @@ def process_group(
 
     decoded_responses = tokenizer.batch_decode(result.responses, skip_special_tokens=False)
 
-    percent_solved = np.mean(result.reward_scores).item() / max_possible_score
+    percent_solved = (
+        np.mean(result.verifier_correctness).item()
+        if result.verifier_correctness is not None
+        else np.mean(result.reward_scores).item() / max_possible_score
+    )
     if no_resampling_pass_rate is not None and percent_solved >= no_resampling_pass_rate:
         assert iter_dataloader is not None
         iter_dataloader.exclude_index(result.index)
@@ -1133,7 +1158,13 @@ def accumulate_inference_batches(
                 num_prompts_sampled += 1
                 progress_bar.update(1)
             total_filtered_prompts += 1
-            if result.reward_scores[0] == 0:
+            if result.verifier_correctness is not None and all(not value for value in result.verifier_correctness):
+                filtered_prompt_zero += 1
+            elif result.verifier_correctness is not None and all(result.verifier_correctness):
+                filtered_prompt_solved += 1
+            elif result.verifier_correctness is not None:
+                filtered_prompt_nonzero += 1
+            elif result.reward_scores[0] == 0:
                 filtered_prompt_zero += 1
             elif result.reward_scores[0] == max_possible_score:
                 filtered_prompt_solved += 1

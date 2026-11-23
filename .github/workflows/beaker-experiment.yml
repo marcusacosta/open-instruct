@@ -1,0 +1,120 @@
+name: Beaker Experiment Launch
+
+# TEMPORARY (branch kevinfarhat/a4b-repin-main-image-build, never merged): build main's CUDA 13 MoE
+# (transformer-engine) image from kevinfarhat/a4b-repin-main-image at PR_COMMIT and create it on Beaker.
+# No experiments are launched and no shared alias is published.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOCKER_BUILDKIT: "1"
+  PR_COMMIT: ce2a11a32879851ce7f257e77c1a147b4d720823
+
+jobs:
+  launch-experiment:
+    name: Launch Beaker Experiment
+    runs-on: 8-Core-XL-Runner-Ubuntu-Latest
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: bash -euo pipefail {0}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history to get commit author info
+
+      - name: Use the PR commit's source, on the PR branch's name (names the image)
+        run: |
+          git checkout -B kevinfarhat/a4b-repin-main-image "$PR_COMMIT"
+          test -z "$(git status --porcelain)"
+
+      - name: Checkout oe-eval-internal
+        uses: actions/checkout@v4
+        with:
+          repository: allenai/oe-eval-internal
+          path: './oe-eval-internal'
+          ssh-key: ${{ secrets.OE_EVAL_GIT_CLONE_ACCESS_PRIVATE_SSH_DEPLOY_KEY }}
+          fetch-depth: 1
+          filter: 'blob:none'
+
+      - name: Get trigger information
+        id: get-trigger-info
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Get the commit author for push events
+            AUTHOR_NAME=$(git log -1 --pretty=format:'%an')
+            echo "trigger_info=Push by ${AUTHOR_NAME}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Get the user who triggered the manual dispatch
+            echo "trigger_info=Manual dispatch by ${{ github.actor }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get changed files using git diff
+        id: changed-files
+        run: |
+          COMMON_ANCESTOR=$(git merge-base HEAD origin/main)
+
+          CHANGED_FILES=$(git diff --name-only ${COMMON_ANCESTOR} HEAD)
+          printf 'Changed files:\n%s\n' "$CHANGED_FILES"
+
+          declare -A CHANGE_PATTERNS=(
+            [dpo_changed]="open_instruct/(dpo|dpo_tune_cache|dpo_utils)\.py"
+            [finetune_changed]="open_instruct/finetune\.py"
+            [grpo_changed]="(^|/)Dockerfile$|(^|/)mason\.py$|^open_instruct/"
+          )
+
+          for OUTPUT_KEY in "${!CHANGE_PATTERNS[@]}"; do
+            PATTERN="${CHANGE_PATTERNS[$OUTPUT_KEY]}"
+            MATCHED=$(grep -qE "$PATTERN" <<< "$CHANGED_FILES" && echo true || echo false)
+            echo "${OUTPUT_KEY}=${MATCHED}" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Setup Python environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Setup Beaker
+        uses: allenai/setup-beaker@v2
+        with:
+          token: ${{ secrets.BEAKER_TOKEN }}
+          workspace: ai2/open-instruct-dev
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build CUDA 13 MoE image and create it on Beaker (no launches)
+        env:
+          BEAKER_TOKEN: ${{ secrets.BEAKER_TOKEN }}
+          UV_NO_SYNC: "1"
+          # Own cache ref, so this cu13 build does not overwrite the shared buildcache main CI reads.
+          DOCKER_CACHE_REPO: ghcr.io/allenai/open-instruct:buildcache-a4b-image-build-moe
+        run: |
+          echo "Git commit: $(git rev-parse --short HEAD)"
+          df -h / || true
+          # build_image_and_launch.sh runs its script argument after the build; an empty script launches nothing.
+          ./scripts/train/build_image_and_launch.sh --cuda-version 13 --moe /dev/null
+          BEAKER_USER=$(beaker account whoami --format json | jq -r '.[0].name')
+          SANITIZED_BRANCH=$(git rev-parse --abbrev-ref HEAD | sed 's/[^a-zA-Z0-9._-]/-/g' | tr '[:upper:]' '[:lower:]' | sed 's/^-//')
+          IMAGE_NAME="open-instruct-integration-test-${SANITIZED_BRANCH}-cuda13-moe"
+          beaker image get "$BEAKER_USER/$IMAGE_NAME" --format json | jq '.[0] | {id, fullName, description, created}'
+          echo "=== baked configs/olmo_core/olmo35_small_a4b_sft.json (inner checkpoint flags) ==="
+          docker run --rm --entrypoint bash "$IMAGE_NAME" -c 'grep -n -E "checkpoint_attn|checkpoint_permute_moe_unpermute|checkpoint_second_unpermute|recompute_each_block" /stage/configs/olmo_core/olmo35_small_a4b_sft.json; echo GIT_COMMIT=$GIT_COMMIT'
+          echo "=== package check ==="
+          docker run --rm --entrypoint python "$IMAGE_NAME" -c 'import importlib.metadata as m; [print(p, m.version(p)) for p in ("torch", "transformer_engine", "transformer_engine_torch", "ai2-olmo-core", "transformers")]' || true

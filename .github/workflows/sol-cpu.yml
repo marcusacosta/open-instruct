@@ -1,0 +1,50 @@
+name: SOL CPU tests
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sol-cpu:
+    name: SOL integration tests (Linux CPU)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CUDA_VISIBLE_DEVICES: ""
+      ACCELERATE_USE_CPU: "true"
+      DS_ACCELERATOR: cpu
+      HF_HUB_OFFLINE: "1"
+      WANDB_MODE: offline
+      RAY_USAGE_STATS_ENABLED: "0"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.8.6"
+
+      - name: Install Python 3.12
+        run: uv python install 3.12
+
+      - name: Create CPU test environment
+        run: uv venv --python 3.12 tests/sol_cpu/.venv-sol-cpu
+
+      - name: Install pinned CPU dependencies
+        run: >-
+          uv pip sync
+          --no-config
+          --python tests/sol_cpu/.venv-sol-cpu/bin/python
+          --torch-backend=cpu
+          tests/sol_cpu/requirements.lock
+
+      - name: Run SOL tests
+        run: >-
+          tests/sol_cpu/.venv-sol-cpu/bin/python -m pytest -q
+          --noconftest
+          open_instruct/test_sol_utils.py
+          open_instruct/test_sol_reward_config.py
+          open_instruct/test_sol_utils_integration.py
